@@ -2,9 +2,7 @@ package auth
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"io"
+	"fmt"
 	"sync"
 	"time"
 
@@ -12,9 +10,9 @@ import (
 	"github.com/jinzhu/gorm"
 )
 
-// KeyData contains a key along with its expiry time and KID.
+// KeyData contains a key along with its expiry time and ID.
 type KeyData struct {
-	KID    string `gorm:"primary_key"`
+	ID     uint `gorm:"primary_key"`
 	Key    []byte
 	Expiry time.Time
 }
@@ -22,12 +20,10 @@ type KeyData struct {
 // NewKey generates a new key with the given expiry time.
 func NewKey(expiry time.Time) (*KeyData, error) {
 	key := make([]byte, 16)
-	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+	if _, err := rand.Read(key); err != nil {
 		return nil, err
 	}
-	keyHash := sha256.Sum256(key)
 	return &KeyData{
-		KID:    base64.RawURLEncoding.EncodeToString(keyHash[:]),
 		Key:    key,
 		Expiry: expiry,
 	}, nil
@@ -36,17 +32,17 @@ func NewKey(expiry time.Time) (*KeyData, error) {
 // KeyStore is a generic interface for generating tokens and accessing keys.
 type KeyStore interface {
 	NewToken(map[string]interface{}) (string, time.Time, error)
-	GetLatest() (*KeyData, error)
-	Get(kid string) (*KeyData, bool)
+	GetKey(token *jwt.Token) (interface{}, error)
+	Get(id uint) (*KeyData, bool)
 	Add(k *KeyData)
-	Remove(kid string)
+	Remove(id uint)
 }
 
 type keystore struct {
 	sync.RWMutex
-	cache          map[string]*KeyData
+	cache          map[uint]*KeyData
 	db             *gorm.DB
-	latest         string
+	lastID         uint
 	step, lifetime time.Duration
 }
 
@@ -55,7 +51,7 @@ type keystore struct {
 func NewKeystore(db *gorm.DB, step, lifetime time.Duration) KeyStore {
 	db.CreateTable(&KeyData{})
 	return &keystore{
-		cache:    make(map[string]*KeyData),
+		cache:    make(map[uint]*KeyData),
 		db:       db,
 		step:     step,
 		lifetime: lifetime,
@@ -63,28 +59,42 @@ func NewKeystore(db *gorm.DB, step, lifetime time.Duration) KeyStore {
 }
 
 func (ks *keystore) NewToken(claims map[string]interface{}) (t string, expiry time.Time, err error) {
-	k, err := ks.GetLatest()
+	k, err := ks.getLatest()
 	if err != nil {
 		return
 	}
-
-	expiry = k.Expiry
 
 	token := jwt.New(jwt.SigningMethodHS256)
 	if claims != nil {
 		token.Claims = claims
 	}
 	token.Claims["vrs"] = "1"
-	token.Claims["kid"] = k.KID
 	token.Claims["exp"] = k.Expiry.Unix()
+	token.Claims["id"] = k.ID
 
 	t, err = token.SignedString(k.Key)
+	expiry = k.Expiry
 	return
 }
 
-func (ks *keystore) GetLatest() (*KeyData, error) {
+// GetKey returns the key in the KeyStore associated with a token's kid.
+func (ks *keystore) GetKey(token *jwt.Token) (interface{}, error) {
+	id, ok := token.Claims["kid"].(uint)
+	if !ok {
+		return nil, fmt.Errorf("invalid kid: %v", token.Claims["kid"])
+	}
+
+	k, ok := ks.Get(id)
+	if !ok {
+		return nil, fmt.Errorf("couldn't find id %d", id)
+	}
+
+	return k.Key, nil
+}
+
+func (ks *keystore) getLatest() (*KeyData, error) {
 	var err error
-	k, ok := ks.Get(ks.latest)
+	k, ok := ks.Get(ks.lastID)
 	if !ok || k.Expiry.Before(time.Now().Truncate(ks.step).Add(ks.lifetime)) {
 		k, err = NewKey(time.Now().Truncate(ks.step).Add(ks.lifetime))
 		if err != nil {
@@ -96,12 +106,15 @@ func (ks *keystore) GetLatest() (*KeyData, error) {
 	return k, nil
 }
 
-func (ks *keystore) Get(kid string) (*KeyData, bool) {
+func (ks *keystore) Get(id uint) (*KeyData, bool) {
+	if id == 0 {
+		id = ks.lastID
+	}
 	ks.RLock()
-	k, ok := ks.cache[kid]
+	k, ok := ks.cache[id]
 	ks.RUnlock()
 	if !ok {
-		k = &KeyData{KID: kid}
+		k = &KeyData{ID: id}
 		ks.db.First(k)
 		if k.Key != nil {
 			ks.addCached(k)
@@ -114,22 +127,22 @@ func (ks *keystore) Get(kid string) (*KeyData, bool) {
 func (ks *keystore) addCached(k *KeyData) {
 	ks.Lock()
 	defer ks.Unlock()
-	ks.cache[k.KID] = k
-	if latestKey, ok := ks.cache[ks.latest]; !ok || k.Expiry.After(latestKey.Expiry) {
-		ks.latest = k.KID
+	ks.cache[k.ID] = k
+	if lastIDKey, ok := ks.cache[ks.lastID]; !ok || k.Expiry.After(lastIDKey.Expiry) {
+		ks.lastID = k.ID
 	}
 }
 
 func (ks *keystore) Add(k *KeyData) {
-	ks.addCached(k)
 	ks.db.Create(k)
+	ks.addCached(k)
 }
 
-func (ks *keystore) Remove(kid string) {
+func (ks *keystore) Remove(id uint) {
 	ks.Lock()
 	defer ks.Unlock()
-	delete(ks.cache, kid)
+	delete(ks.cache, id)
 
 	// Do we need to hold the lock here?
-	ks.db.Delete(&KeyData{KID: kid})
+	ks.db.Delete(&KeyData{ID: id})
 }

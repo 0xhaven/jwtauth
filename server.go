@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jacobhaven/jwtauth/server/auth"
+	"github.com/jacobhaven/jwtauth/auth"
 	"github.com/jinzhu/gorm"
 	_ "github.com/jinzhu/gorm/dialects/sqlite"
 )

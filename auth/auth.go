@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"fmt"
 	"net/http"
 	"time"
 
@@ -38,21 +37,6 @@ func NewServerCustom(db *gorm.DB, keyStep, keyLifetime time.Duration) *Server {
 	}
 }
 
-// getKey returns the key in the KeyStore associated with a token's kid.
-func (as *Server) getKey(token *jwt.Token) (interface{}, error) {
-	kid, ok := token.Claims["kid"].(string)
-	if !ok {
-		return nil, fmt.Errorf("invalid kid: %v", token.Claims["kid"])
-	}
-
-	k, ok := as.Get(kid)
-	if !ok {
-		return nil, fmt.Errorf("couldn't find kid %s", kid)
-	}
-
-	return k.Key, nil
-}
-
 // A UserFilter determines whether or not a given username is authorized.
 type UserFilter func(string) bool
 
@@ -71,7 +55,7 @@ func (as *Server) Wrap(h http.Handler, filter UserFilter) http.Handler {
 			return
 		}
 
-		token, err := jwt.Parse(cookie.Value, as.getKey)
+		token, err := jwt.Parse(cookie.Value, as.GetKey)
 		if err != nil || !token.Valid {
 			if ve, ok := err.(*jwt.ValidationError); ok {
 				if ve.Errors&jwt.ValidationErrorExpired != 0 {
